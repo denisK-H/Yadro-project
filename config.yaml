@@ -6,17 +6,19 @@ devices:
     timeout_ms: 3000
     write_termination: "\n"
     read_termination: "\n"
+    skip_idn: true
 
   osc:
     resource: "USB0::0x5345::0x1235::24410241::INSTR"
     timeout_ms: 3000
     write_termination: "\n"
     read_termination: ""
+    skip_idn: false
 
 scpi:
   generator_init:
     - ":CHANnel1:BASE:WAVe SINe"
-    - ":CHANnel1:BASE:AMPLitude 1"
+    - ":CHANnel1:BASE:AMPLitude 0.5"
     - ":CHANnel1:OUTPut ON"
 
   set_frequency: ":CHANnel1:BASE:FREQuency %.6f"
@@ -26,10 +28,21 @@ scpi:
 
 experiment:
   freq_start_hz: 100
-  freq_stop_hz: 1000000
-  points: 40
-  settle_ms: 500
-
+  freq_stop_hz: 3000000
+  points: 18
+  settle_ms: 1000
   read_mode: "raw"
-  read_delay_ms: 100
+  read_delay_ms: 300
   read_max_bytes: 4096
+  measure_retries: 3
+  retry_delay_ms: 250
+
+adaptive:
+  enabled: true
+  max_points: 120
+  max_passes: 5
+  refine_db_threshold: 2.0
+  unity_gain_target: 1.0
+  unity_search_enabled: true
+  unity_tol_ratio: 0.03
+  unity_max_iter: 10
