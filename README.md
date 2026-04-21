@@ -54,27 +54,38 @@ Python-мост к приборам.
 ```bash
 pip install pyvisa pyvisa-py flask matplotlib
 ```
-2. Установить зависимости Go
 
+### 2. Установить зависимости Go
+```bash
 go mod tidy
-3. Запустить Python bridge
+```
+
+### 3. Запустить Python bridge
+```bash
 python bridge.py
-4. Запустить измерение
+```
+
+### 4. Запустить измерение
+```bash
 go run .\main.go
+```
 
 После этого появится файл:
 
-results.csv
-5. Построить графики
+`results.csv`
+
+### 5. Построить графики
 python plot_ach.py
 
 После этого появятся файлы:
-
+```
 ach_linear.png
 ach_db.png
 vin_vout.png
-Порядок работы
-bridge.py поднимает HTTP-сервис для работы с приборами
-main.go через него управляет генератором и осциллографом
-main.go сохраняет измерения в results.csv
-plot_ach.py строит графики по CSV
+```
+
+### Порядок работы
+1. bridge.py поднимает HTTP-сервис для работы с приборами
+2. main.go через него управляет генератором и осциллографом
+3. main.go сохраняет измерения в results.csv
+4. plot_ach.py строит графики по CSV
