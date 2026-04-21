@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"sort"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -19,6 +20,7 @@ type DeviceConfig struct {
 	TimeoutMS        int    `yaml:"timeout_ms"`
 	WriteTermination string `yaml:"write_termination"`
 	ReadTermination  string `yaml:"read_termination"`
+	SkipIDN          bool   `yaml:"skip_idn"`
 }
 
 type DevicesConfig struct {
@@ -34,14 +36,26 @@ type SCPIConfig struct {
 }
 
 type ExperimentConfig struct {
-	FreqStartHz float64 `yaml:"freq_start_hz"`
-	FreqStopHz  float64 `yaml:"freq_stop_hz"`
-	Points      int     `yaml:"points"`
-	SettleMS    int     `yaml:"settle_ms"`
+	FreqStartHz    float64 `yaml:"freq_start_hz"`
+	FreqStopHz     float64 `yaml:"freq_stop_hz"`
+	Points         int     `yaml:"points"`
+	SettleMS       int     `yaml:"settle_ms"`
+	ReadMode       string  `yaml:"read_mode"`
+	ReadDelayMS    int     `yaml:"read_delay_ms"`
+	ReadMaxBytes   int     `yaml:"read_max_bytes"`
+	MeasureRetries int     `yaml:"measure_retries"`
+	RetryDelayMS   int     `yaml:"retry_delay_ms"`
+}
 
-	ReadMode    string `yaml:"read_mode"`
-	ReadDelayMS int    `yaml:"read_delay_ms"`
-	ReadMaxBytes int   `yaml:"read_max_bytes"`
+type AdaptiveConfig struct {
+	Enabled           bool    `yaml:"enabled"`
+	MaxPoints         int     `yaml:"max_points"`
+	MaxPasses         int     `yaml:"max_passes"`
+	RefineDBThreshold float64 `yaml:"refine_db_threshold"`
+	UnityGainTarget   float64 `yaml:"unity_gain_target"`
+	UnitySearchEnable bool    `yaml:"unity_search_enabled"`
+	UnityTolRatio     float64 `yaml:"unity_tol_ratio"`
+	UnityMaxIter      int     `yaml:"unity_max_iter"`
 }
 
 type Config struct {
@@ -49,6 +63,7 @@ type Config struct {
 	Devices    DevicesConfig    `yaml:"devices"`
 	SCPI       SCPIConfig       `yaml:"scpi"`
 	Experiment ExperimentConfig `yaml:"experiment"`
+	Adaptive   AdaptiveConfig   `yaml:"adaptive"`
 }
 
 type BridgeClient struct {
@@ -56,11 +71,22 @@ type BridgeClient struct {
 	Client  *http.Client
 }
 
+type Point struct {
+	FreqHz    float64
+	Vin       float64
+	Vout      float64
+	Gain      float64
+	VinRaw    string
+	VoutRaw   string
+	OK        bool
+	PointType string
+}
+
 func NewBridgeClient(baseURL string) *BridgeClient {
 	return &BridgeClient{
 		BaseURL: baseURL,
 		Client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 20 * time.Second,
 		},
 	}
 }
@@ -106,6 +132,7 @@ func (b *BridgeClient) Connect(name string, cfg DeviceConfig) error {
 		"timeout_ms":        cfg.TimeoutMS,
 		"write_termination": cfg.WriteTermination,
 		"read_termination":  cfg.ReadTermination,
+		"skip_idn":          cfg.SkipIDN,
 	}
 
 	var resp map[string]any
@@ -125,7 +152,7 @@ func (b *BridgeClient) Write(device, cmd string) error {
 	return b.post("/write", req, nil)
 }
 
-func (b *BridgeClient) QueryNumber(device, cmd, mode string, delayMS, maxBytes int) (float64, error) {
+func (b *BridgeClient) QueryNumber(device, cmd, mode string, delayMS, maxBytes int) (float64, string, error) {
 	req := map[string]any{
 		"device":    device,
 		"cmd":       cmd,
@@ -142,10 +169,10 @@ func (b *BridgeClient) QueryNumber(device, cmd, mode string, delayMS, maxBytes i
 	}
 
 	if err := b.post("/query_number", req, &resp); err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
-	return resp.Value, nil
+	return resp.Value, resp.Raw, nil
 }
 
 func (b *BridgeClient) CloseAll() {
@@ -161,6 +188,28 @@ func loadConfig(path string) (*Config, error) {
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
+	}
+
+	if cfg.Experiment.MeasureRetries <= 0 {
+		cfg.Experiment.MeasureRetries = 1
+	}
+	if cfg.Adaptive.MaxPoints <= 0 {
+		cfg.Adaptive.MaxPoints = 100
+	}
+	if cfg.Adaptive.MaxPasses <= 0 {
+		cfg.Adaptive.MaxPasses = 4
+	}
+	if cfg.Adaptive.RefineDBThreshold <= 0 {
+		cfg.Adaptive.RefineDBThreshold = 2.0
+	}
+	if cfg.Adaptive.UnityGainTarget <= 0 {
+		cfg.Adaptive.UnityGainTarget = 1.0
+	}
+	if cfg.Adaptive.UnityTolRatio <= 0 {
+		cfg.Adaptive.UnityTolRatio = 0.03
+	}
+	if cfg.Adaptive.UnityMaxIter <= 0 {
+		cfg.Adaptive.UnityMaxIter = 8
 	}
 
 	return &cfg, nil
@@ -185,6 +234,295 @@ func logspace(start, stop float64, n int) []float64 {
 	return result
 }
 
+func gainDB(g float64) float64 {
+	if g <= 0 {
+		return math.NaN()
+	}
+	return 20 * math.Log10(g)
+}
+
+func hasPointNear(points []Point, f float64) bool {
+	for _, p := range points {
+		if math.Abs(p.FreqHz-f)/f < 1e-6 {
+			return true
+		}
+	}
+	return false
+}
+
+func sortPoints(points []Point) {
+	sort.Slice(points, func(i, j int) bool {
+		return points[i].FreqHz < points[j].FreqHz
+	})
+}
+
+func measurePoint(bridge *BridgeClient, cfg *Config, f float64, pointType string) Point {
+	freqCmd := fmt.Sprintf(cfg.SCPI.SetFrequency, f)
+	if err := bridge.Write("gen", freqCmd); err != nil {
+		fmt.Printf("generator write error at %.2f Hz: %v\n", f, err)
+		return Point{FreqHz: f, OK: false, PointType: pointType}
+	}
+
+	time.Sleep(time.Duration(cfg.Experiment.SettleMS) * time.Millisecond)
+
+	var lastErr error
+	for attempt := 1; attempt <= cfg.Experiment.MeasureRetries; attempt++ {
+		vin, vinRaw, err := bridge.QueryNumber(
+			"osc",
+			cfg.SCPI.MeasureVin,
+			cfg.Experiment.ReadMode,
+			cfg.Experiment.ReadDelayMS,
+			cfg.Experiment.ReadMaxBytes,
+		)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(cfg.Experiment.RetryDelayMS) * time.Millisecond)
+			continue
+		}
+
+		vout, voutRaw, err := bridge.QueryNumber(
+			"osc",
+			cfg.SCPI.MeasureVout,
+			cfg.Experiment.ReadMode,
+			cfg.Experiment.ReadDelayMS,
+			cfg.Experiment.ReadMaxBytes,
+		)
+		if err != nil {
+			lastErr = err
+			time.Sleep(time.Duration(cfg.Experiment.RetryDelayMS) * time.Millisecond)
+			continue
+		}
+
+		gain := 0.0
+		if vin != 0 {
+			gain = vout / vin
+		}
+
+		fmt.Printf(
+			"f=%.2f Hz  Vin=%.6f V  Vout=%.6f V  Gain=%.6f\n",
+			f, vin, vout, gain,
+		)
+
+		return Point{
+			FreqHz:    f,
+			Vin:       vin,
+			Vout:      vout,
+			Gain:      gain,
+			VinRaw:    vinRaw,
+			VoutRaw:   voutRaw,
+			OK:        true,
+			PointType: pointType,
+		}
+	}
+
+	fmt.Printf("measure error at %.2f Hz: %v\n", f, lastErr)
+	return Point{FreqHz: f, OK: false, PointType: pointType}
+}
+
+func crossesTarget(a, b Point, target float64) bool {
+	if !a.OK || !b.OK {
+		return false
+	}
+	return (a.Gain-target)*(b.Gain-target) <= 0
+}
+
+func segmentNeedsRefine(a, b Point, acfg AdaptiveConfig) bool {
+	if !a.OK || !b.OK {
+		return false
+	}
+
+	if crossesTarget(a, b, acfg.UnityGainTarget) {
+		return true
+	}
+
+	db1 := gainDB(a.Gain)
+	db2 := gainDB(b.Gain)
+	if math.IsNaN(db1) || math.IsNaN(db2) {
+		return false
+	}
+
+	if math.Abs(db2-db1) >= acfg.RefineDBThreshold {
+		return true
+	}
+
+	return false
+}
+
+func adaptiveSweep(bridge *BridgeClient, cfg *Config) []Point {
+	points := make([]Point, 0)
+
+	initialFreqs := logspace(
+		cfg.Experiment.FreqStartHz,
+		cfg.Experiment.FreqStopHz,
+		cfg.Experiment.Points,
+	)
+
+	for _, f := range initialFreqs {
+		points = append(points, measurePoint(bridge, cfg, f, "base"))
+	}
+	sortPoints(points)
+
+	if !cfg.Adaptive.Enabled {
+		return points
+	}
+
+	for pass := 0; pass < cfg.Adaptive.MaxPasses; pass++ {
+		sortPoints(points)
+		added := false
+
+		current := make([]Point, len(points))
+		copy(current, points)
+
+		for i := 0; i < len(current)-1; i++ {
+			if len(points) >= cfg.Adaptive.MaxPoints {
+				break
+			}
+
+			a := current[i]
+			b := current[i+1]
+
+			if !segmentNeedsRefine(a, b, cfg.Adaptive) {
+				continue
+			}
+
+			mid := math.Sqrt(a.FreqHz * b.FreqHz)
+
+			if mid <= a.FreqHz || mid >= b.FreqHz {
+				continue
+			}
+			if hasPointNear(points, mid) {
+				continue
+			}
+
+			fmt.Printf("refine between %.2f Hz and %.2f Hz -> %.2f Hz\n", a.FreqHz, b.FreqHz, mid)
+			points = append(points, measurePoint(bridge, cfg, mid, "refined"))
+			added = true
+		}
+
+		if !added {
+			break
+		}
+	}
+
+	sortPoints(points)
+	return points
+}
+
+func searchUnityGain(bridge *BridgeClient, cfg *Config, left, right Point) (Point, bool) {
+	target := cfg.Adaptive.UnityGainTarget
+
+	if !crossesTarget(left, right, target) {
+		return Point{}, false
+	}
+
+	best := left
+	if math.Abs(right.Gain-target) < math.Abs(left.Gain-target) {
+		best = right
+	}
+
+	for iter := 0; iter < cfg.Adaptive.UnityMaxIter; iter++ {
+		ratio := right.FreqHz / left.FreqHz
+		if ratio <= 1.0+cfg.Adaptive.UnityTolRatio {
+			break
+		}
+
+		midFreq := math.Sqrt(left.FreqHz * right.FreqHz)
+		mid := measurePoint(bridge, cfg, midFreq, "unity")
+		if !mid.OK {
+			break
+		}
+
+		if math.Abs(mid.Gain-target) < math.Abs(best.Gain-target) {
+			best = mid
+		}
+
+		if crossesTarget(left, mid, target) {
+			right = mid
+		} else {
+			left = mid
+		}
+	}
+
+	return best, true
+}
+
+func appendUnitySearchPoints(bridge *BridgeClient, cfg *Config, points []Point) []Point {
+	if !cfg.Adaptive.Enabled || !cfg.Adaptive.UnitySearchEnable {
+		return points
+	}
+
+	sortPoints(points)
+
+	for i := 0; i < len(points)-1; i++ {
+		a := points[i]
+		b := points[i+1]
+
+		if !crossesTarget(a, b, cfg.Adaptive.UnityGainTarget) {
+			continue
+		}
+
+		fmt.Printf("unity-gain bracket found: %.2f Hz .. %.2f Hz\n", a.FreqHz, b.FreqHz)
+		best, ok := searchUnityGain(bridge, cfg, a, b)
+		if ok && best.OK && !hasPointNear(points, best.FreqHz) {
+			points = append(points, best)
+			fmt.Printf("unity gain approx at %.2f Hz, Gain=%.6f\n", best.FreqHz, best.Gain)
+		}
+		break
+	}
+
+	sortPoints(points)
+	return points
+}
+
+func writeCSV(path string, points []Point) error {
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	if err := writer.Write([]string{
+		"frequency_hz",
+		"vin_vpp",
+		"vout_vpp",
+		"gain",
+		"gain_db",
+		"ok",
+		"point_type",
+		"vin_raw",
+		"vout_raw",
+	}); err != nil {
+		return err
+	}
+
+	for _, p := range points {
+		gdb := ""
+		if p.OK && p.Gain > 0 {
+			gdb = fmt.Sprintf("%.9f", gainDB(p.Gain))
+		}
+
+		row := []string{
+			fmt.Sprintf("%.6f", p.FreqHz),
+			fmt.Sprintf("%.9f", p.Vin),
+			fmt.Sprintf("%.9f", p.Vout),
+			fmt.Sprintf("%.9f", p.Gain),
+			gdb,
+			fmt.Sprintf("%t", p.OK),
+			p.PointType,
+			p.VinRaw,
+			p.VoutRaw,
+		}
+		if err := writer.Write(row); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
@@ -207,65 +545,29 @@ func main() {
 		}
 	}
 
-	freqs := logspace(cfg.Experiment.FreqStartHz, cfg.Experiment.FreqStopHz, cfg.Experiment.Points)
+	points := adaptiveSweep(bridge, cfg)
+	points = appendUnitySearchPoints(bridge, cfg, points)
+	sortPoints(points)
 
-	file, err := os.Create("results.csv")
-	if err != nil {
+	if err := writeCSV("results.csv", points); err != nil {
 		panic(err)
-	}
-	defer file.Close()
-
-	writer := csv.NewWriter(file)
-	defer writer.Flush()
-
-	_ = writer.Write([]string{"frequency_hz", "vin_vpp", "vout_vpp", "gain"})
-
-	for _, f := range freqs {
-		freqCmd := fmt.Sprintf(cfg.SCPI.SetFrequency, f)
-		if err := bridge.Write("gen", freqCmd); err != nil {
-			panic(err)
-		}
-
-		time.Sleep(time.Duration(cfg.Experiment.SettleMS) * time.Millisecond)
-
-		vin, err := bridge.QueryNumber(
-			"osc",
-			cfg.SCPI.MeasureVin,
-			cfg.Experiment.ReadMode,
-			cfg.Experiment.ReadDelayMS,
-			cfg.Experiment.ReadMaxBytes,
-		)
-		if err != nil {
-			fmt.Printf("vin read error at %.2f Hz: %v\n", f, err)
-			continue
-		}
-
-		vout, err := bridge.QueryNumber(
-			"osc",
-			cfg.SCPI.MeasureVout,
-			cfg.Experiment.ReadMode,
-			cfg.Experiment.ReadDelayMS,
-			cfg.Experiment.ReadMaxBytes,
-		)
-		if err != nil {
-			fmt.Printf("vout read error at %.2f Hz: %v\n", f, err)
-			continue
-		}
-
-		gain := 0.0
-		if vin != 0 {
-			gain = vout / vin
-		}
-
-		fmt.Printf("f=%.2f Hz  Vin=%.6f  Vout=%.6f  Gain=%.6f\n", f, vin, vout, gain)
-
-		_ = writer.Write([]string{
-			fmt.Sprintf("%.6f", f),
-			fmt.Sprintf("%.6f", vin),
-			fmt.Sprintf("%.6f", vout),
-			fmt.Sprintf("%.6f", gain),
-		})
 	}
 
 	fmt.Println("Done. Results saved to results.csv")
+
+	foundUnity := false
+	for i := 0; i < len(points)-1; i++ {
+		if crossesTarget(points[i], points[i+1], cfg.Adaptive.UnityGainTarget) {
+			fmt.Printf(
+				"Unity gain is between %.2f Hz and %.2f Hz\n",
+				points[i].FreqHz,
+				points[i+1].FreqHz,
+			)
+			foundUnity = true
+			break
+		}
+	}
+	if !foundUnity {
+		fmt.Println("Unity gain crossing was not found in current frequency range.")
+	}
 }
