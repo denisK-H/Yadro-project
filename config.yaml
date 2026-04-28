@@ -2,7 +2,7 @@ bridge_url: "http://127.0.0.1:8080"
 
 devices:
   gen:
-    resource: "USB0::0x6656::0x0834::AWG1224500035::INSTR"
+    resource: "USB0::0x6656::0x0834::AWG1224090049::INSTR"
     timeout_ms: 3000
     write_termination: "\n"
     read_termination: "\n"
@@ -28,7 +28,7 @@ scpi:
 
 experiment:
   freq_start_hz: 100
-  freq_stop_hz: 3000000
+  freq_stop_hz: 10000000
   points: 18
   settle_ms: 1000
   read_mode: "raw"
@@ -46,3 +46,12 @@ adaptive:
   unity_search_enabled: true
   unity_tol_ratio: 0.03
   unity_max_iter: 10
+
+unity_search:
+  enabled: true
+  start_hz: 1000
+  max_hz: 30000000
+  freq_multiplier: 1.2
+  target_gain: 1.0
+  tolerance: 0.05
+  max_refine_iter: 12

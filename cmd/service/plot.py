@@ -71,7 +71,6 @@ def find_unity_crossing(rows):
             if x2 == x1:
                 return a["frequency_hz"], None
 
-            # линейная интерполяция по оси log(f)
             x0 = x1 + (0 - y1) * (x2 - x1) / (y2 - y1)
             f0 = 10 ** x0
             return f0, (a, b)

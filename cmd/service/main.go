@@ -64,6 +64,7 @@ type Config struct {
 	SCPI       SCPIConfig       `yaml:"scpi"`
 	Experiment ExperimentConfig `yaml:"experiment"`
 	Adaptive   AdaptiveConfig   `yaml:"adaptive"`
+	UnitySearch UnitySearchConfig `yaml:"unity_search"`
 }
 
 type BridgeClient struct {
@@ -82,6 +83,16 @@ type Point struct {
 	PointType string
 }
 
+type UnitySearchConfig struct {
+	Enabled       bool    `yaml:"enabled"`
+	StartHz       float64 `yaml:"start_hz"`
+	MaxHz         float64 `yaml:"max_hz"`
+	FreqMultiplier float64 `yaml:"freq_multiplier"`
+	TargetGain    float64 `yaml:"target_gain"`
+	Tolerance      float64 `yaml:"tolerance"`
+	MaxRefineIter  int     `yaml:"max_refine_iter"`
+}
+
 func NewBridgeClient(baseURL string) *BridgeClient {
 	return &BridgeClient{
 		BaseURL: baseURL,
@@ -89,6 +100,173 @@ func NewBridgeClient(baseURL string) *BridgeClient {
 			Timeout: 20 * time.Second,
 		},
 	}
+}
+
+func searchUnityGainByIncreasingFrequency(
+	bridge *BridgeClient,
+	cfg *Config,
+) []Point {
+	points := make([]Point, 0)
+
+	startHz := cfg.UnitySearch.StartHz
+	maxHz := cfg.UnitySearch.MaxHz
+	multiplier := cfg.UnitySearch.FreqMultiplier
+	target := cfg.UnitySearch.TargetGain
+
+	if startHz <= 0 {
+		startHz = cfg.Experiment.FreqStartHz
+	}
+
+	if maxHz <= 0 {
+		maxHz = cfg.Experiment.FreqStopHz
+	}
+
+	if multiplier <= 1 {
+		multiplier = 1.3
+	}
+
+	if target <= 0 {
+		target = 1.0
+	}
+
+	fmt.Println("Starting unity gain search...")
+	fmt.Printf("start=%.2f Hz, max=%.2f Hz, multiplier=%.3f, target=%.3f\n",
+		startHz, maxHz, multiplier, target,
+	)
+
+	f := startHz
+
+	first := measurePoint(bridge, cfg, f, "base")
+	points = append(points, first)
+
+	if !first.OK {
+		fmt.Println("First point measurement failed")
+		return points
+	}
+
+	if first.Gain <= target {
+		fmt.Printf(
+			"Gain is already <= %.3f at %.2f Hz. Gain=%.6f\n",
+			target,
+			first.FreqHz,
+			first.Gain,
+		)
+		return points
+	}
+
+	prev := first
+
+	for {
+		f = f * multiplier
+
+		if f > maxHz {
+			fmt.Printf(
+				"Unity gain was not found up to %.2f Hz. Last gain=%.6f\n",
+				maxHz,
+				prev.Gain,
+			)
+			break
+		}
+
+		curr := measurePoint(bridge, cfg, f, "base")
+		points = append(points, curr)
+
+		if !curr.OK {
+			fmt.Printf("Measurement failed at %.2f Hz, continue...\n", f)
+			prev = curr
+			continue
+		}
+
+		if prev.OK && prev.Gain > target && curr.Gain <= target {
+			fmt.Printf(
+				"Unity gain bracket found: %.2f Hz Gain=%.6f -> %.2f Hz Gain=%.6f\n",
+				prev.FreqHz,
+				prev.Gain,
+				curr.FreqHz,
+				curr.Gain,
+			)
+
+			refined := refineUnityGain(bridge, cfg, prev, curr)
+			points = append(points, refined...)
+
+			break
+		}
+
+		prev = curr
+	}
+
+	sortPoints(points)
+	return points
+}
+
+func refineUnityGain(
+	bridge *BridgeClient,
+	cfg *Config,
+	left Point,
+	right Point,
+) []Point {
+	refinedPoints := make([]Point, 0)
+
+	target := cfg.UnitySearch.TargetGain
+	tolerance := cfg.UnitySearch.Tolerance
+	maxIter := cfg.UnitySearch.MaxRefineIter
+
+	if target <= 0 {
+		target = 1.0
+	}
+	if tolerance <= 0 {
+		tolerance = 0.03
+	}
+	if maxIter <= 0 {
+		maxIter = 10
+	}
+
+	fmt.Println("Refining unity gain frequency...")
+
+	best := left
+	if math.Abs(right.Gain-target) < math.Abs(left.Gain-target) {
+		best = right
+	}
+
+	for i := 0; i < maxIter; i++ {
+		midFreq := math.Sqrt(left.FreqHz * right.FreqHz)
+
+		mid := measurePoint(bridge, cfg, midFreq, "unity")
+		refinedPoints = append(refinedPoints, mid)
+
+		if !mid.OK {
+			fmt.Printf("Refine measurement failed at %.2f Hz\n", midFreq)
+			break
+		}
+
+		if math.Abs(mid.Gain-target) < math.Abs(best.Gain-target) {
+			best = mid
+		}
+
+		relativeError := math.Abs(mid.Gain-target) / target
+		if relativeError <= tolerance {
+			fmt.Printf(
+				"Unity gain found: f=%.2f Hz, Gain=%.6f\n",
+				mid.FreqHz,
+				mid.Gain,
+			)
+			break
+		}
+
+		if mid.Gain > target {
+			left = mid
+		} else {
+			right = mid
+		}
+	}
+
+	fmt.Printf(
+		"Best unity approximation: f=%.2f Hz, Gain=%.6f\n",
+		best.FreqHz,
+		best.Gain,
+	)
+
+	return refinedPoints
 }
 
 func (b *BridgeClient) post(path string, reqBody any, out any) error {
@@ -545,8 +723,15 @@ func main() {
 		}
 	}
 
-	points := adaptiveSweep(bridge, cfg)
-	points = appendUnitySearchPoints(bridge, cfg, points)
+	var points []Point
+
+	if cfg.UnitySearch.Enabled {
+		points = searchUnityGainByIncreasingFrequency(bridge, cfg)
+	} else {
+		points = adaptiveSweep(bridge, cfg)
+		points = appendUnitySearchPoints(bridge, cfg, points)
+	}
+
 	sortPoints(points)
 
 	if err := writeCSV("results.csv", points); err != nil {

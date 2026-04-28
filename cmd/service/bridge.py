@@ -17,14 +17,6 @@ def get_device(name: str):
 
 
 def parse_scpi_value(text: str):
-    """
-    Преобразует строки вида:
-      'Vpp: 896mV->'
-      'Vpp: 1.112V->'
-      '32mV'
-      '0.52V'
-    в float в ВОЛЬТАХ.
-    """
     text = text.strip()
 
     match = re.search(r'([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s*([uUmMkK]?V)', text)
@@ -45,12 +37,10 @@ def parse_scpi_value(text: str):
         if unit in multipliers:
             return value * multipliers[unit]
 
-        # На случай странного регистра вроде mV/Mv
         unit_norm = unit.replace("K", "k").replace("U", "u")
         if unit_norm in multipliers:
             return value * multipliers[unit_norm]
 
-    # Запасной вариант: просто первое число без единицы
     match_num = re.search(r'[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?', text)
     if match_num:
         return float(match_num.group())
