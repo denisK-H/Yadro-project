@@ -1,0 +1,134 @@
+bridge_url: "http://127.0.0.1:8080"
+
+devices:
+  gen:
+    resource: "USB0::0x6656::0x0834::AWG1224090049::INSTR"
+    timeout_ms: 3000
+    write_termination: "\n"
+    read_termination: "\n"
+    skip_idn: true
+
+  osc:
+    resource: "USB0::0x5345::0x1235::24410241::INSTR"
+    timeout_ms: 3000
+    write_termination: "\n"
+    read_termination: ""
+    skip_idn: false
+
+scpi:
+  generator_init:
+    - ":CHANnel1:BASE:WAVe SINe"
+    - ":CHANnel1:BASE:AMPLitude 0.5"
+    - ":CHANnel1:OUTPut ON"
+
+  oscilloscope_init:
+    - ":CH1:DISPlay ON"
+    - ":CH2:DISPlay ON"
+    - ":CH1:COUPling AC"
+    - ":CH2:COUPling AC"
+    - ":CH1:OFFSet 0"
+    - ":CH2:OFFSet 0"
+    - ":MEASUrement:DISPlay ON"
+
+  set_frequency: ":CHANnel1:BASE:FREQuency %.6f"
+
+  measure_vin: ":MEASUrement:CH1:PKPK?"
+  measure_vout: ":MEASUrement:CH2:PKPK?"
+
+experiment:
+  freq_start_hz: 100
+  freq_stop_hz: 10000000
+  points: 18
+  settle_ms: 1000
+  read_mode: "raw"
+  read_delay_ms: 300
+  read_max_bytes: 4096
+  measure_retries: 3
+  retry_delay_ms: 250
+
+osc_autoscale:
+  enabled: false
+  commands:
+    - ":AUTOset ON"
+  run_after_frequency_change: true
+  settle_ms: 4000
+  fail_on_error: false
+
+osc_manual_scale:
+  enabled: true
+  scales:
+    - "1mv"
+    - "2mv"
+    - "5mv"
+    - "10mv"
+    - "20mv"
+    - "50mv"
+    - "100mv"
+    - "200mv"
+    - "500mv"
+    - "1v"
+    - "2v"
+    - "5v"
+    - "10v"
+  ch1_initial_scale: "50mv"
+  ch2_initial_scale: "1v"
+  target_divisions: 3.0
+  min_divisions: 1.5
+  max_adjustments: 5
+  settle_ms: 500
+
+osc_time_scale:
+  enabled: true
+  scales:
+    - "1ns"
+    - "2ns"
+    - "5ns"
+    - "10ns"
+    - "20ns"
+    - "50ns"
+    - "100ns"
+    - "200ns"
+    - "500ns"
+    - "1us"
+    - "2us"
+    - "5us"
+    - "10us"
+    - "20us"
+    - "50us"
+    - "100us"
+    - "200us"
+    - "500us"
+    - "1ms"
+    - "2ms"
+    - "5ms"
+    - "10ms"
+    - "20ms"
+    - "50ms"
+    - "100ms"
+    - "200ms"
+    - "500ms"
+    - "1s"
+  periods_on_screen: 3.0
+  settle_ms: 200
+
+adaptive:
+  enabled: true
+  max_points: 120
+  max_passes: 5
+  refine_db_threshold: 2.0
+  unity_gain_target: 1.0
+  unity_search_enabled: true
+  unity_tol_ratio: 0.03
+  unity_max_iter: 10
+
+unity_search:
+  enabled: true
+  start_hz: 1000
+  max_hz: 30000000
+  hard_max_hz: 100000000
+  scale: "log"
+  points_per_decade: 12
+  max_extend_points: 40
+  target_gain: 1.0
+  tolerance: 0.05
+  max_refine_iter: 12
