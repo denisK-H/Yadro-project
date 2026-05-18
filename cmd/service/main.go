@@ -9,6 +9,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -1281,6 +1282,36 @@ func reportUnityCrossing(points []Point, targetGain float64) {
 	}
 }
 
+func runPlotScript(csvPath string) error {
+	plotPath := "cmd/service/plot.py"
+	pythonCandidates := []string{"python", "py", "python3"}
+
+	var lastErr error
+	for _, python := range pythonCandidates {
+		if _, err := exec.LookPath(python); err != nil {
+			lastErr = err
+			continue
+		}
+
+		cmd := exec.Command(python, plotPath, csvPath)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Stdin = os.Stdin
+
+		if err := cmd.Run(); err != nil {
+			lastErr = err
+			continue
+		}
+
+		return nil
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("python executable was not found")
+	}
+	return lastErr
+}
+
 func main() {
 	cfg, err := loadConfig("config.yaml")
 	if err != nil {
@@ -1334,4 +1365,9 @@ func main() {
 		targetGain = normalizedUnityTarget(cfg)
 	}
 	reportUnityCrossing(points, targetGain)
+
+	fmt.Println("Building plots...")
+	if err := runPlotScript("results.csv"); err != nil {
+		fmt.Printf("plot.py failed: %v\n", err)
+	}
 }

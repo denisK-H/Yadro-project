@@ -123,7 +123,7 @@ adaptive:
 
 unity_search:
   enabled: true
-  start_hz: 1000
+  start_hz: 100
   max_hz: 30000000
   hard_max_hz: 100000000
   scale: "log"

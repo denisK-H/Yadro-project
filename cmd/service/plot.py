@@ -84,27 +84,11 @@ def savefig(path):
 
 
 def save_plots(rows, output_dir):
-    valid_gain = [r for r in rows if r["ok"] and r["gain"] is not None]
     valid_db = [r for r in rows if r["ok"] and r["gain_db"] is not None]
     valid_voltage = [
         r for r in rows
         if r["ok"] and r["vin_vpp"] is not None and r["vout_vpp"] is not None
     ]
-
-    if valid_gain:
-        plt.figure(figsize=(10, 5))
-        plt.semilogx(
-            [r["frequency_hz"] for r in valid_gain],
-            [r["gain"] for r in valid_gain],
-            marker="o",
-            linestyle="-",
-        )
-        plt.title("Frequency response: linear gain")
-        plt.xlabel("Frequency, Hz")
-        plt.ylabel("Ku = Vout / Vin")
-        plt.grid(True, which="both")
-        plt.tight_layout()
-        savefig(output_dir / "ach_linear.png")
 
     if valid_db:
         plt.figure(figsize=(10, 5))
@@ -136,11 +120,27 @@ def save_plots(rows, output_dir):
                 textcoords="offset points",
             )
 
+        K_mid_db = 12.6
+        f_L = 100.0
+        f_H = 1140000.0
+
+        f_th = [
+            10 ** (math.log10(100) + i * (math.log10(10000000) - math.log10(100)) / 99)
+            for i in range(100)
+        ]
+        gain_th_db = [
+            K_mid_db - 10 * math.log10(1 + (f_L / f) ** 2) - 10 * math.log10(1 + (f / f_H) ** 2)
+            for f in f_th
+        ]
+
+        plt.semilogx(f_th, gain_th_db, linestyle="--", color="red", linewidth=1.5, label="theory")
+
         plt.title("Frequency response: dB")
         plt.xlabel("Frequency, Hz")
         plt.ylabel("Ku, dB")
         plt.grid(True, which="both")
         plt.legend()
+        plt.xlim(left=100, right=6000000)
         plt.tight_layout()
         savefig(output_dir / "ach_db.png")
 
